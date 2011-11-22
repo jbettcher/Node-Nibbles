@@ -16,7 +16,7 @@ var http = require('http'),
     fs = require('fs');
 
 var config = {
-  PORT: 9003, // where this server runs
+  PORT: 9006, // where this server runs
 
   API_HOST: 'api.twitter.com',
 
@@ -25,7 +25,7 @@ var config = {
   // Gets called when a new request comes in, first one that matches wins
   hooks : [
     {
-      test : function(count) { return (count % 10 === 0); },
+      //test : function(count) { return (count % 10 === 0); },
       handler: function(req, res) {
         res.writeHead(500, { 'Content-Type': 'text/plain' });
         setTimeout(function() {
@@ -35,11 +35,20 @@ var config = {
       }
     },
     {
-      test : function(count) { return (count % 11 === 0); },
+      //test : function(count) { return (count % 11 === 0); },
       handler: function(req, res) {
         return function(cb) {
           // simulate a long request
           setTimeout(cb, 2500);
+        }
+      }
+    },
+    {
+      test : function(count, request) { return (request.url.match(/\/1\/friendships\/create\//)); },
+      handler: function(req, res) {
+        return function(cb) {
+          // simulate a long request
+          setTimeout(cb, 4500);
         }
       }
     }
@@ -61,9 +70,10 @@ var config = {
   // Returns a unique identifier given some input parameters.
   // TODO: This doesn't work very well for POSTs with body parameters
   //       It also means that order of URL params matters, which it shouldn't
-  function nameFromUrl(url, method) {
+  function nameFromUrl(url, method, body) {
     var hash = crypto.createHash('md5');
     hash.update(url + method);
+    if (body && body.length > 0) { hash.update(body) }
     return hash.digest('hex');
   }
 
@@ -120,8 +130,8 @@ var config = {
     }
   }
 
-  function fetchOrigin(request, cb) {
-    var req, body = '', opts = {
+  function fetchOrigin(request, requestBody, cb) {
+    var req, responseBody = '', opts = {
       host: config.API_HOST,
       port: config.API_PORT,
       method: request.method,
@@ -131,13 +141,16 @@ var config = {
     req = http.request(opts, function(res) {
       res.setEncoding('binary');
       res.on('data', function(data) {
-        body += data;
+        responseBody += data;
       });
       res.on('end', function() {
         res.headers.code = res.statusCode;
-        cb.success(body, JSON.stringify(res.headers));
+        cb.success(responseBody, JSON.stringify(res.headers));
       });
     });
+    if ( requestBody && requestBody.length > 0 ) {
+      req.write(requestBody, 'binary');
+    }
     req.on('error', function(e) {
       if ( cb.error ) { cb.error(e); }
     });
@@ -145,16 +158,17 @@ var config = {
   }
 
   function saveStub(name, body, head) {
+    l("Saving stub for " + name);
     fs.writeFileSync(stubPath(name, 'body'), body, 'binary');
     if ( head ) { fs.writeFileSync(stubPath(name, 'head'), head); }
   }
 
-  function handleRequest(name, request, response) {
+  function handleRequest(name, request, requestBody, response) {
     fetchStubs(name, {
       error: function(err) {
-        l("No stub found for " + request.url);
+        l("No stub found for " + request.url + " (" + name + ")");
         // That's OK, get it from the origin server
-        fetchOrigin(request, {
+        fetchOrigin(request, requestBody, {
           success: function(body, head) {
             saveStub(name, body, head);
             cache.b[name] = body;
@@ -176,20 +190,27 @@ var config = {
   }
 
   http.createServer(function (request, response) {
-    var hook, i, cb, name = nameFromUrl(request.url);
+    var hook, body = '', i, cb;
 
-    l("Processing request for " + request.url);
-    count += 1;
-    for (i=0;i<config.hooks.length;i++) {
-      hook = config.hooks[i];
-      if ( hook.test(count) ) {
-        l("Using custom handler for request " + count);
-        cb = hook.handler(request, response);
-        if ( cb ) { cb(function() { handleRequest(name, request, response); }); }
-        return;
+    request.on('data', function(chunk) {
+      body += chunk;
+    });
+    request.on('end', function() {
+      var name = nameFromUrl(request.url, request.method, body);
+      l("Processing request for " + request.method + " " + request.url + " (" + name + ")");
+      count += 1;
+      for (i=0;i<config.hooks.length;i++) {
+        hook = config.hooks[i];
+        if ( hook.test && hook.test(count, request) ) {
+          l("Using custom handler for request " + count);
+          cb = hook.handler(request, response);
+          if ( cb ) { cb(function() { handleRequest(name, request, body, response); }); }
+          return;
+        }
       }
-    }
-    handleRequest(name, request, response);
+      handleRequest(name, request, body, response);
+    });
+
   }).listen(config.PORT);
 
   console.log('Server running at http://0.0.0.0:' + config.PORT);
